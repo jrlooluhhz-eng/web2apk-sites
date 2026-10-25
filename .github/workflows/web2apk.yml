@@ -55,7 +55,6 @@ jobs:
           ICON_URL: ${{ github.event.inputs.icon_url }}
           STEALTH_JSON: ${{ github.event.inputs.stealth_json }}
         run: |
-          # Sanitize app name for project name
           SAFE_NAME=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_' | cut -c1-20)
           [ -z "$SAFE_NAME" ] && SAFE_NAME="webapp"
           
@@ -63,7 +62,6 @@ jobs:
           flutter pub add webview_flutter
           flutter pub add flutter_launcher_icons --dev
           
-          # Generate main.dart
           cat > lib/main.dart << DART_EOF
           import 'package:flutter/material.dart';
           import 'package:webview_flutter/webview_flutter.dart';
@@ -113,16 +111,13 @@ jobs:
           }
           DART_EOF
           
-          # Set app label
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i "s|android:label=\".*\"|android:label=\"$APP_NAME\"|" "$MANIFEST"
           
-          # Internet permission
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
             sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
           fi
           
-          # Custom icon if provided
           if [ -n "$ICON_URL" ]; then
             curl -sL "$ICON_URL" -o /tmp/icon.png || true
             if [ -s /tmp/icon.png ]; then
@@ -138,7 +133,9 @@ jobs:
           fi
           
           echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-          flutter build apk --release -v
+          
+          # 🔥 FITUR OBFUSCATION
+          flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
           
           APK=$(find . -name "app-release.apk" | head -n 1)
           if [ -z "$APK" ]; then
@@ -146,7 +143,6 @@ jobs:
             exit 1
           fi
           
-          # Upload as artifact
           mkdir -p /tmp/out
           cp "$APK" /tmp/out/app.apk
       
@@ -155,3 +151,5 @@ jobs:
         with:
           name: apk-${{ github.event.inputs.app_id }}
           path: /tmp/out/app.apk
+          if-no-files-found: error
+          retention-days: 1
