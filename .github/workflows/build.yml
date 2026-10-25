@@ -1,4 +1,4 @@
-name: Build Flutter APK - Fixed
+name: Build APK - Universal
 on:
   release:
     types: [created]
@@ -11,79 +11,167 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup - Download ZIP
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      
+      - name: Download ZIP
+        id: download
         run: |
           TAG=${{ github.event.release.tag_name }}
-          echo "=== Building tag: $TAG ==="
           mkdir -p /tmp/build
-          echo "Listing release assets..."
-          gh release view $TAG --repo ${{ github.repository }} || true
-          gh release download $TAG --repo ${{ github.repository }} -D /tmp/build || gh release download $TAG --repo ${{ github.repository }} -D /tmp/build --pattern "*.zip" || true
-          ls -la /tmp/build/
+          for i in 1 2 3 4 5 6; do
+            gh release download $TAG --repo ${{ github.repository }} -D /tmp/build --pattern "*.zip" 2>/dev/null && break
+            echo "Retry $i - menunggu ZIP muncul..."
+            sleep 5
+          done
           ZIPFILE=$(find /tmp/build -name "*.zip" | head -n 1)
           if [ -z "$ZIPFILE" ]; then
-            echo "Trying to find any zip..."
-            gh release download $TAG --repo ${{ github.repository }} -D /tmp --pattern "*.zip" || true
-            ZIPFILE=$(find /tmp -maxdepth 2 -name "*.zip" | head -n 1)
-          fi
-          echo "ZIPFILE=$ZIPFILE"
-          if [ -z "$ZIPFILE" ] || [ ! -f "$ZIPFILE" ]; then
-            echo "❌ No ZIP found!"
-            gh release view $TAG --repo ${{ github.repository }}
+            echo "❌ No ZIP found in release!"
             exit 1
           fi
           mkdir -p ./project
           unzip -o "$ZIPFILE" -d ./project
-          echo "=== Project structure ==="
-          ls -la ./project | head -n 100
-          find ./project -name "pubspec.yaml" | head -n 5
+          echo "=== Structure ==="
+          ls -la ./project
+          echo "=== pubspec check ==="
+          find ./project -name "pubspec.yaml" | head -n 1
+          echo "=== html check ==="
+          find ./project -name "index.html" | head -n 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.19.6'
           channel: 'stable'
           cache: true
       
-      - name: Build APK
+      - name: Detect & Build
         run: |
           PUBSPEC=$(find ./project -name "pubspec.yaml" | head -n 1)
-          if [ -z "$PUBSPEC" ]; then
-            echo "❌ pubspec.yaml not found!"
-            find ./project -type f | head -n 200
+          INDEX_HTML=$(find ./project -name "index.html" | head -n 1)
+          
+          if [ -n "$PUBSPEC" ]; then
+            echo "📦 TYPE: FLUTTER PROJECT"
+            DIR=$(dirname "$PUBSPEC")
+            cd "$DIR"
+            if [ ! -d "android" ]; then
+              echo "⚠️ No android folder, creating..."
+              flutter create . --platforms=android
+            fi
+            mkdir -p android
+            grep -q "org.gradle.jvmargs" android/gradle.properties 2>/dev/null || echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            flutter pub get
+            flutter build apk --release -v
+            APK=$(find . -name "app-release.apk" | head -n 1)
+            
+          elif [ -n "$INDEX_HTML" ]; then
+            echo "🌐 TYPE: HTML PROJECT (WebView wrapper)"
+            cd ./project
+            
+            # Create Flutter WebView wrapper project
+            flutter create --org com.anonymous --project-name webview_app webview_build
+            cd webview_build
+            
+            flutter pub add webview_flutter
+            
+            # Copy HTML project as assets
+            mkdir -p assets/www
+            rsync -a --exclude='webview_build' --exclude='.git' ../ ./assets/www/ 2>/dev/null || cp -r ../* assets/www/ 2>/dev/null || true
+            
+            # Overwrite main.dart
+            cat > lib/main.dart << 'DART_EOF'
+import 'package:flutter/material.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+void main() { runApp(const MyApp()); }
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: const WebViewScreen(),
+    );
+  }
+}
+
+class WebViewScreen extends StatefulWidget {
+  const WebViewScreen({super.key});
+  @override
+  State<WebViewScreen> createState() => _WebViewScreenState();
+}
+
+class _WebViewScreenState extends State<WebViewScreen> {
+  late final WebViewController controller;
+  bool _loading = true;
+  @override
+  void initState() {
+    super.initState();
+    controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageFinished: (_) => setState(() => _loading = false),
+      ))
+      ..loadFlutterAsset('assets/www/index.html');
+  }
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(children: [
+        WebViewWidget(controller: controller),
+        if (_loading) const Center(child: CircularProgressIndicator()),
+      ]),
+    );
+  }
+}
+DART_EOF
+            
+            # Add assets to pubspec
+            python3 -c "
+import re
+with open('pubspec.yaml') as f: c = f.read()
+if 'assets:' not in c:
+    c += '\n  assets:\n    - assets/www/\n'
+else:
+    c = c.replace('uses-material-design: true', 'uses-material-design: true\n  assets:\n    - assets/www/')
+with open('pubspec.yaml','w') as f: f.write(c)
+"
+            
+            # Add INTERNET permission
+            MANIFEST="android/app/src/main/AndroidManifest.xml"
+            if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+              sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
+            fi
+            
+            mkdir -p android
+            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            
+            flutter pub get
+            flutter build apk --release -v
+            APK=$(find . -name "app-release.apk" | head -n 1)
+            
+          else
+            echo "❌ Unknown project type! Neither pubspec.yaml nor index.html found."
             exit 1
           fi
-          DIR=$(dirname "$PUBSPEC")
-          echo "✅ Found project at: $DIR"
-          cd "$DIR"
-          echo "=== pubspec.yaml ==="
-          cat pubspec.yaml
-          echo "=== flutter doctor ==="
-          flutter doctor -v || true
-          echo "=== pub get ==="
-          flutter pub get
-          echo "=== Building APK Release ==="
-          flutter build apk --release -v
-          echo "=== Finding APK ==="
-          APK=$(find . -path "*build/app/outputs/flutter-apk/app-release.apk" | head -n 1)
-          if [ -z "$APK" ]; then APK=$(find . -name "*.apk" | head -n 1); fi
+          
           if [ -z "$APK" ]; then
-            echo "❌ APK not found!"
-            find . -name "*.apk" -o -name "*.aab"
+            echo "❌ APK file not found after build!"
             exit 1
           fi
-          echo "✅ APK found: $APK"
-          ls -lh "$APK"
           cp "$APK" /tmp/app-release.apk
           ls -lh /tmp/app-release.apk
       
-      - name: Upload APK to Release (FIXED)
+      - name: Upload APK to Release
         run: |
           TAG=${{ github.event.release.tag_name }}
-          echo "Uploading APK to release $TAG"
           gh release upload $TAG /tmp/app-release.apk --clobber --repo ${{ github.repository }}
-          echo "✅ APK uploaded to release!"
-          gh release view $TAG --repo ${{ github.repository }}
+          echo "✅ APK uploaded!"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
