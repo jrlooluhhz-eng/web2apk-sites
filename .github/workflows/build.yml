@@ -1,4 +1,4 @@
-name: Build APK Universal
+name: Build Flutter APK - Fixed
 on:
   release:
     types: [created]
@@ -38,7 +38,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
       
@@ -57,7 +57,9 @@ jobs:
             mkdir -p android
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            flutter build apk --release -v
+            
+            # 🔥 FITUR OBFUSCATION (ANTI HACK)
+            flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
             APK=$(find . -name "app-release.apk" | head -n 1)
             
           elif [ -n "$INDEX_HTML" ]; then
@@ -111,7 +113,9 @@ jobs:
             mkdir -p android
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            flutter build apk --release -v
+            
+            # 🔥 FITUR OBFUSCATION
+            flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
             APK=$(find . -name "app-release.apk" | head -n 1)
             
           else
