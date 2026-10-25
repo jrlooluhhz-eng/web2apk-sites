@@ -1,4 +1,4 @@
-name: Build Flutter APK - Fixed
+name: Build APK Universal
 on:
   release:
     types: [created]
@@ -57,51 +57,58 @@ jobs:
             mkdir -p android
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            
-            # 🔥 FITUR OBFUSCATION (ANTI HACK)
             flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
             APK=$(find . -name "app-release.apk" | head -n 1)
             
           elif [ -n "$INDEX_HTML" ]; then
-            echo "🌐 TYPE: HTML PROJECT (WebView wrapper)"
-            cd ./project
+            echo "🌐 TYPE: WEB ZIP (HTML/JS)"
+            WEB_DIR=$(dirname "$INDEX_HTML")
+            cd "$WEB_DIR"
+            
             flutter create --org com.anonymous --project-name webview_app webview_build
             cd webview_build
             flutter pub add webview_flutter
+            
             mkdir -p assets/www
             cp -r ../. ./assets/www/ 2>/dev/null || true
             
-            echo 'import "package:flutter/material.dart";' > lib/main.dart
-            echo 'import "package:webview_flutter/webview_flutter.dart";' >> lib/main.dart
-            echo 'void main() => runApp(const MyApp());' >> lib/main.dart
-            echo 'class MyApp extends StatelessWidget {' >> lib/main.dart
-            echo '  const MyApp({super.key});' >> lib/main.dart
-            echo '  @override' >> lib/main.dart
-            echo '  Widget build(BuildContext context) {' >> lib/main.dart
-            echo '    return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());' >> lib/main.dart
-            echo '  }' >> lib/main.dart
-            echo '}' >> lib/main.dart
-            echo 'class WebViewScreen extends StatefulWidget {' >> lib/main.dart
-            echo '  const WebViewScreen({super.key});' >> lib/main.dart
-            echo '  @override' >> lib/main.dart
-            echo '  State<WebViewScreen> createState() => _WebViewScreenState();' >> lib/main.dart
-            echo '}' >> lib/main.dart
-            echo 'class _WebViewScreenState extends State<WebViewScreen> {' >> lib/main.dart
-            echo '  late final WebViewController controller;' >> lib/main.dart
-            echo '  bool _loading = true;' >> lib/main.dart
-            echo '  @override' >> lib/main.dart
-            echo '  void initState() {' >> lib/main.dart
-            echo '    super.initState();' >> lib/main.dart
-            echo '    controller = WebViewController()' >> lib/main.dart
-            echo '      ..setJavaScriptMode(JavaScriptMode.unrestricted)' >> lib/main.dart
-            echo '      ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))' >> lib/main.dart
-            echo '      ..loadFlutterAsset("assets/www/index.html");' >> lib/main.dart
-            echo '  }' >> lib/main.dart
-            echo '  @override' >> lib/main.dart
-            echo '  Widget build(BuildContext context) {' >> lib/main.dart
-            echo '    return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));' >> lib/main.dart
-            echo '  }' >> lib/main.dart
-            echo '}' >> lib/main.dart
+            cat > lib/main.dart << DART_EOF
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+          
+          void main() => runApp(const MyApp());
+          
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+            }
+          }
+          
+          class WebViewScreen extends StatefulWidget {
+            const WebViewScreen({super.key});
+            @override
+            State<WebViewScreen> createState() => _WebViewScreenState();
+          }
+          
+          class _WebViewScreenState extends State<WebViewScreen> {
+            late final WebViewController controller;
+            bool _loading = true;
+            @override
+            void initState() {
+              super.initState();
+              controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
+                ..loadFlutterAsset('assets/www/index.html');
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
+            }
+          }
+          DART_EOF
             
             echo "  assets:" >> pubspec.yaml
             echo "    - assets/www/" >> pubspec.yaml
@@ -113,8 +120,6 @@ jobs:
             mkdir -p android
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            
-            # 🔥 FITUR OBFUSCATION
             flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
             APK=$(find . -name "app-release.apk" | head -n 1)
             
