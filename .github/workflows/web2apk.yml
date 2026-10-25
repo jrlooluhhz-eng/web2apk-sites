@@ -144,10 +144,10 @@ jobs:
           mkdir -p /tmp/out
           cp "$APK" /tmp/out/app.apk
       
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ github.event.inputs.app_id }}
-          path: /tmp/out/app.apk
-          if-no-files-found: error
-          retention-days: 1
+      # 🔥 PERUBAHAN DI SINI: UPLOAD KE RELEASES, BUKAN ARTIFACTS
+      - name: Upload APK to Release
+        run: |
+          TAG="${{ github.event.inputs.app_id }}"
+          gh release create "$TAG" /tmp/out/app.apk --title "Web2APK - ${{ github.event.inputs.app_name }}" --notes "URL: ${{ github.event.inputs.web_url }}" || gh release upload "$TAG" /tmp/out/app.apk --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
