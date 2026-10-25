@@ -1,4 +1,6 @@
 name: Web2APK Build
+run-name: "Web2APK - ${{ github.event.inputs.app_id }}"
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,7 +43,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.6'
+          flutter-version: '3.32.8' # Menggunakan versi stabil terbaru
           channel: 'stable'
           cache: true
       
