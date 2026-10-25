@@ -1,4 +1,4 @@
-name: Build Flutter APK
+name: Build Flutter APK - Fixed
 on:
   release:
     types: [created]
@@ -10,38 +10,80 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Download ZIP from release
+      
+      - name: Setup - Download ZIP
         run: |
           TAG=${{ github.event.release.tag_name }}
-          mkdir -p ./tmp
-          gh release download $TAG --repo ${{ github.repository }} -D ./tmp --pattern "*.zip" || gh release download $TAG --repo ${{ github.repository }} -D ./tmp
-          ZIPFILE=$(find ./tmp -name "*.zip" | head -n 1)
+          echo "=== Building tag: $TAG ==="
+          mkdir -p /tmp/build
+          echo "Listing release assets..."
+          gh release view $TAG --repo ${{ github.repository }} || true
+          gh release download $TAG --repo ${{ github.repository }} -D /tmp/build || gh release download $TAG --repo ${{ github.repository }} -D /tmp/build --pattern "*.zip" || true
+          ls -la /tmp/build/
+          ZIPFILE=$(find /tmp/build -name "*.zip" | head -n 1)
+          if [ -z "$ZIPFILE" ]; then
+            echo "Trying to find any zip..."
+            gh release download $TAG --repo ${{ github.repository }} -D /tmp --pattern "*.zip" || true
+            ZIPFILE=$(find /tmp -maxdepth 2 -name "*.zip" | head -n 1)
+          fi
+          echo "ZIPFILE=$ZIPFILE"
+          if [ -z "$ZIPFILE" ] || [ ! -f "$ZIPFILE" ]; then
+            echo "❌ No ZIP found!"
+            gh release view $TAG --repo ${{ github.repository }}
+            exit 1
+          fi
           mkdir -p ./project
-          unzip -o "$ZIPFILE" -d ./project || true
-          ls -la ./project
+          unzip -o "$ZIPFILE" -d ./project
+          echo "=== Project structure ==="
+          ls -la ./project | head -n 100
+          find ./project -name "pubspec.yaml" | head -n 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0'
+          flutter-version: '3.19.6'
           channel: 'stable'
-      - name: Find pubspec.yaml and Build APK
+          cache: true
+      
+      - name: Build APK
         run: |
-          PUBSPEC_DIR=$(find ./project -name "pubspec.yaml" | head -n 1 | xargs dirname)
-          echo "Found pubspec at: $PUBSPEC_DIR"
-          cd "$PUBSPEC_DIR"
+          PUBSPEC=$(find ./project -name "pubspec.yaml" | head -n 1)
+          if [ -z "$PUBSPEC" ]; then
+            echo "❌ pubspec.yaml not found!"
+            find ./project -type f | head -n 200
+            exit 1
+          fi
+          DIR=$(dirname "$PUBSPEC")
+          echo "✅ Found project at: $DIR"
+          cd "$DIR"
+          echo "=== pubspec.yaml ==="
+          cat pubspec.yaml
+          echo "=== flutter doctor ==="
+          flutter doctor -v || true
+          echo "=== pub get ==="
           flutter pub get
-          flutter build apk --release --verbose
-          APK_PATH=$(find . -name "*.apk" | head -n 1)
-          cp "$APK_PATH" /tmp/app-release.apk
-      - name: Upload APK to Release
+          echo "=== Building APK Release ==="
+          flutter build apk --release -v
+          echo "=== Finding APK ==="
+          APK=$(find . -path "*build/app/outputs/flutter-apk/app-release.apk" | head -n 1)
+          if [ -z "$APK" ]; then APK=$(find . -name "*.apk" | head -n 1); fi
+          if [ -z "$APK" ]; then
+            echo "❌ APK not found!"
+            find . -name "*.apk" -o -name "*.aab"
+            exit 1
+          fi
+          echo "✅ APK found: $APK"
+          ls -lh "$APK"
+          cp "$APK" /tmp/app-release.apk
+          ls -lh /tmp/app-release.apk
+      
+      - name: Upload APK to Release (FIXED)
         run: |
           TAG=${{ github.event.release.tag_name }}
+          echo "Uploading APK to release $TAG"
           gh release upload $TAG /tmp/app-release.apk --clobber --repo ${{ github.repository }}
+          echo "✅ APK uploaded to release!"
+          gh release view $TAG --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Upload APK as Artifact (backup)
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-build
-          path: /tmp/app-release.apk
