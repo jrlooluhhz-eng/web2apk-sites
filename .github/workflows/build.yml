@@ -1,4 +1,5 @@
-name: Build APK - Universal
+name: Build Flutter APK - Fixed
+
 on:
   release:
     types: [created]
@@ -9,37 +10,39 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
       
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-      
-      - name: Download ZIP
-        id: download
+          
+      - name: Download and Extract ZIP
         run: |
           TAG=${{ github.event.release.tag_name }}
+          echo "=== Building tag: $TAG ==="
           mkdir -p /tmp/build
+          
+          # Download ZIP dengan retry
           for i in 1 2 3 4 5 6; do
             gh release download $TAG --repo ${{ github.repository }} -D /tmp/build --pattern "*.zip" 2>/dev/null && break
             echo "Retry $i - menunggu ZIP muncul..."
             sleep 5
           done
+          
           ZIPFILE=$(find /tmp/build -name "*.zip" | head -n 1)
           if [ -z "$ZIPFILE" ]; then
             echo "❌ No ZIP found in release!"
             exit 1
           fi
+          
+          echo "✅ Found ZIP: $ZIPFILE"
           mkdir -p ./project
           unzip -o "$ZIPFILE" -d ./project
-          echo "=== Structure ==="
-          ls -la ./project
-          echo "=== pubspec check ==="
-          find ./project -name "pubspec.yaml" | head -n 1
-          echo "=== html check ==="
-          find ./project -name "index.html" | head -n 1
+          echo "=== Project Structure ==="
+          find ./project -maxdepth 2 -type f -name "*.yaml" -o -name "*.html" | head -n 10
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
@@ -50,7 +53,7 @@ jobs:
           channel: 'stable'
           cache: true
       
-      - name: Detect & Build
+      - name: Detect and Build
         run: |
           PUBSPEC=$(find ./project -name "pubspec.yaml" | head -n 1)
           INDEX_HTML=$(find ./project -name "index.html" | head -n 1)
@@ -59,12 +62,17 @@ jobs:
             echo "📦 TYPE: FLUTTER PROJECT"
             DIR=$(dirname "$PUBSPEC")
             cd "$DIR"
+            
+            # Jika tidak ada folder android, buat baru
             if [ ! -d "android" ]; then
               echo "⚠️ No android folder, creating..."
               flutter create . --platforms=android
             fi
+            
+            # Tingkatkan memori Gradle
             mkdir -p android
-            grep -q "org.gradle.jvmargs" android/gradle.properties 2>/dev/null || echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            
             flutter pub get
             flutter build apk --release -v
             APK=$(find . -name "app-release.apk" | head -n 1)
@@ -73,77 +81,64 @@ jobs:
             echo "🌐 TYPE: HTML PROJECT (WebView wrapper)"
             cd ./project
             
-            # Create Flutter WebView wrapper project
+            # Buat project Flutter baru sebagai pembungkus
             flutter create --org com.anonymous --project-name webview_app webview_build
             cd webview_build
-            
             flutter pub add webview_flutter
             
-            # Copy HTML project as assets
+            # Salin file HTML kamu ke dalam project
             mkdir -p assets/www
-            rsync -a --exclude='webview_build' --exclude='.git' ../ ./assets/www/ 2>/dev/null || cp -r ../* assets/www/ 2>/dev/null || true
+            cp -r ../. ./assets/www/ 2>/dev/null || true
             
-            # Overwrite main.dart
+            # Buat file main.dart untuk menampilkan WebView
             cat > lib/main.dart << 'DART_EOF'
-import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-
-void main() { runApp(const MyApp()); }
-
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: const WebViewScreen(),
-    );
-  }
-}
-
-class WebViewScreen extends StatefulWidget {
-  const WebViewScreen({super.key});
-  @override
-  State<WebViewScreen> createState() => _WebViewScreenState();
-}
-
-class _WebViewScreenState extends State<WebViewScreen> {
-  late final WebViewController controller;
-  bool _loading = true;
-  @override
-  void initState() {
-    super.initState();
-    controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (_) => setState(() => _loading = false),
-      ))
-      ..loadFlutterAsset('assets/www/index.html');
-  }
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(children: [
-        WebViewWidget(controller: controller),
-        if (_loading) const Center(child: CircularProgressIndicator()),
-      ]),
-    );
-  }
-}
-DART_EOF
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+          
+          void main() => runApp(const MyApp());
+          
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+            }
+          }
+          
+          class WebViewScreen extends StatefulWidget {
+            const WebViewScreen({super.key});
+            @override
+            State<WebViewScreen> createState() => _WebViewScreenState();
+          }
+          
+          class _WebViewScreenState extends State<WebViewScreen> {
+            late final WebViewController controller;
+            bool _loading = true;
+            @override
+            void initState() {
+              super.initState();
+              controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
+                ..loadFlutterAsset('assets/www/index.html');
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
+            }
+          }
+          DART_EOF
             
-            # Add assets to pubspec
+            # Tambahkan folder assets ke pubspec.yaml
             python3 -c "
-import re
-with open('pubspec.yaml') as f: c = f.read()
-if 'assets:' not in c:
-    c += '\n  assets:\n    - assets/www/\n'
-else:
-    c = c.replace('uses-material-design: true', 'uses-material-design: true\n  assets:\n    - assets/www/')
-with open('pubspec.yaml','w') as f: f.write(c)
-"
+          import re
+          with open('pubspec.yaml') as f: c = f.read()
+          if 'assets:' not in c: c += '\n  assets:\n    - assets/www/\n'
+          else: c = c.replace('uses-material-design: true', 'uses-material-design: true\n  assets:\n    - assets/www/')
+          with open('pubspec.yaml','w') as f: f.write(c)
+          "
             
-            # Add INTERNET permission
+            # Tambahkan izin INTERNET
             MANIFEST="android/app/src/main/AndroidManifest.xml"
             if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
               sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
@@ -172,6 +167,6 @@ with open('pubspec.yaml','w') as f: f.write(c)
         run: |
           TAG=${{ github.event.release.tag_name }}
           gh release upload $TAG /tmp/app-release.apk --clobber --repo ${{ github.repository }}
-          echo "✅ APK uploaded!"
+          echo "✅ APK uploaded to release!"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
