@@ -43,7 +43,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8' # Menggunakan versi stabil terbaru
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
       
