@@ -43,11 +43,11 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
       
-      - name: Build WebView APK
+      - name: Detect & Build
         env:
           APP_ID: ${{ github.event.inputs.app_id }}
           WEB_URL: ${{ github.event.inputs.web_url }}
@@ -55,94 +55,155 @@ jobs:
           ICON_URL: ${{ github.event.inputs.icon_url }}
           STEALTH_JSON: ${{ github.event.inputs.stealth_json }}
         run: |
-          SAFE_NAME=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_' | cut -c1-20)
-          [ -z "$SAFE_NAME" ] && SAFE_NAME="webapp"
-          
-          flutter create --org com.anonymous --project-name "$SAFE_NAME" .
-          flutter pub add webview_flutter
-          # Tambahan package untuk menangani download bawaan WebView
-          flutter pub add flutter_downloader
-          flutter pub add flutter_launcher_icons --dev
-          
-          cat > lib/main.dart << DART_EOF
-          import 'package:flutter/material.dart';
-          import 'package:webview_flutter/webview_flutter.dart';
-          import 'package:flutter_downloader/flutter_downloader.dart';
-          import 'package:flutter/services.dart';
-          
-          void main() async {
-            WidgetsFlutterBinding.ensureInitialized();
-            await FlutterDownloader.initialize(debug: false, ignoreSsl: true);
-            runApp(const MyApp());
-          }
-          
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: '$APP_NAME',
-                debugShowCheckedModeBanner: false,
-                home: const WebViewScreen(),
-              );
+          set -e
+          ROOT="$GITHUB_WORKSPACE/project"
+          PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
+          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
+
+          if [ -n "$PUBSPEC" ]; then
+            echo "📦 TYPE: FLUTTER PROJECT"
+            cd "$(dirname "$PUBSPEC")"
+            if [ ! -d "android" ]; then
+              flutter create . --platforms=android
+            fi
+
+            # --- FIX GEOLOCATOR ---
+            if ! grep -q "dependency_overrides" pubspec.yaml; then
+              echo "" >> pubspec.yaml
+              echo "dependency_overrides:" >> pubspec.yaml
+              echo "  geolocator_android: 4.6.1" >> pubspec.yaml
+            fi
+
+            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
+
+            # --- FIX MANIFEST (PHP) ---
+            php -r '
+              $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
+              if (strpos($manifest, "android.permission.INTERNET") === false) {
+                $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
+                $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
+              }
+              if (strpos($manifest, "usesCleartextTraffic") === false) {
+                $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
+              }
+              file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
+            '
+
+            flutter pub get
+            flutter build apk --release --obfuscate --split-debug-info=./debug-info
+            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+
+          elif [ -n "$INDEX_HTML" ]; then
+            echo "🌐 TYPE: WEB ZIP (HTML/JS)"
+            WEB_DIR=$(dirname "$INDEX_HTML")
+
+            APP_DIR=/tmp/webview_build
+            flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
+            cd "$APP_DIR"
+
+            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
+
+            flutter pub add webview_flutter
+            flutter pub add flutter_downloader
+            flutter pub add permission_handler
+
+            mkdir -p assets/www
+            cp -r "$WEB_DIR"/. assets/www/
+
+            cat << 'DART_EOF' > lib/main.dart
+            import 'package:flutter/material.dart';
+            import 'package:webview_flutter/webview_flutter.dart';
+            import 'package:flutter_downloader/flutter_downloader.dart';
+            import 'package:permission_handler/permission_handler.dart';
+
+            void main() async {
+              WidgetsFlutterBinding.ensureInitialized();
+              await FlutterDownloader.initialize(debug: false, ignoreSsl: true);
+              runApp(const MyApp());
             }
-          }
-          
-          class WebViewScreen extends StatefulWidget {
-            const WebViewScreen({super.key});
-            @override
-            State<WebViewScreen> createState() => _WebViewScreenState();
-          }
-          
-          class _WebViewScreenState extends State<WebViewScreen> {
-            late final WebViewController controller;
-            bool _loading = true;
-            @override
-            void initState() {
-              super.initState();
-              controller = WebViewController()
-                ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                // Mengaktifkan akses file & storage di WebView
-                ..setNavigationDelegate(NavigationDelegate(
-                  onPageFinished: (_) => setState(() => _loading = false),
-                  onNavigationRequest: (request) {
-                    // Biarkan WebView memproses URL
-                    return NavigationDecision.navigate;
-                  },
-                ))
-                // Tambahkan listener untuk mendeteksi link download
-                ..setPlatformNavigationDelegate(NavigationDelegate(
-                  onUrlChange: (change) {},
-                ));
-                
-              // Konfigurasi khusus Android untuk mengizinkan file access
-              controller.loadRequest(Uri.parse('$WEB_URL'));
+
+            class MyApp extends StatelessWidget {
+              const MyApp({super.key});
+              @override
+              Widget build(BuildContext context) {
+                return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+              }
             }
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                body: Stack(children: [
+
+            class WebViewScreen extends StatefulWidget {
+              const WebViewScreen({super.key});
+              @override
+              State<WebViewScreen> createState() => _WebViewScreenState();
+            }
+
+            class _WebViewScreenState extends State<WebViewScreen> {
+              late final WebViewController controller;
+              bool _loading = true;
+
+              @override
+              void initState() {
+                super.initState();
+                _requestPermissions();
+
+                controller = WebViewController()
+                  ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                  ..setNavigationDelegate(NavigationDelegate(
+                    onPageFinished: (_) => setState(() => _loading = false),
+                  ))
+                  ..loadFlutterAsset('assets/www/index.html');
+              }
+
+              Future<void> _requestPermissions() async {
+                await Permission.storage.request();
+                await Permission.notification.request();
+              }
+
+              @override
+              Widget build(BuildContext context) {
+                return Scaffold(body: Stack(children: [
                   WebViewWidget(controller: controller),
-                  if (_loading) const Center(child: CircularProgressIndicator()),
-                ]),
-              );
+                  if (_loading) const Center(child: CircularProgressIndicator())
+                ]));
+              }
             }
-          }
-          DART_EOF
-          
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i "s|android:label=\".*\"|android:label=\"$APP_NAME\"|" "$MANIFEST"
-          
-          # --- UPDATE IZIN: Tambah izin Internet, Storage, dan Media ---
-          # Hapus baris lama jika ada, lalu tambahkan yang baru
-          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-            sed -i '/<manifest/i \    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>' "$MANIFEST"
+            DART_EOF
+
+            {
+              echo "  assets:"
+              find assets -type d | sed 's|$|/|; s|^|    - |'
+            } > /tmp/assets.txt
+            sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
+
+            # --- FIX MANIFEST WEB ZIP (PHP) ---
+            php -r '
+              $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
+              if (strpos($manifest, "android.permission.INTERNET") === false) {
+                $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
+                $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
+              }
+              if (strpos($manifest, "usesCleartextTraffic") === false) {
+                $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
+              }
+              file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
+            '
+
+            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+            flutter pub get
+            flutter build apk --release --obfuscate --split-debug-info=./debug-info
+            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+
+          else
+            echo "❌ Unknown project type!"
+            exit 1
+          fi
+
+          if [ ! -f "$APK" ]; then
+            echo "❌ APK file not found after build!"
+            exit 1
           fi
           
-          # Izinkan cleartext HTTP (untuk web lokal/http) dan tambahkan requestLegacyExternalStorage
-          sed -i 's|<application|<application android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"|' "$MANIFEST"
-          # -------------------------------------------------------------
-          
+          # Setup Ikon (Jika diisi)
           if [ -n "$ICON_URL" ]; then
             curl -sL "$ICON_URL" -o /tmp/icon.png || true
             if [ -s /tmp/icon.png ]; then
@@ -152,26 +213,17 @@ jobs:
             ios: false
             image_path: "/tmp/icon.png"
           YAML_EOF
+              flutter pub add flutter_launcher_icons --dev
               flutter pub get
               dart run flutter_launcher_icons || true
             fi
           fi
           
-          echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-          flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
-          
-          APK=$(find . -name "app-release.apk" | head -n 1)
-          if [ -z "$APK" ]; then
-            echo "❌ APK not found!"
-            exit 1
-          fi
-          
-          mkdir -p /tmp/out
-          cp "$APK" /tmp/out/app.apk
+          cp "$APK" /tmp/app-release.apk
       
       - name: Upload APK to Release
         run: |
           TAG="${{ github.event.inputs.app_id }}"
-          gh release create "$TAG" /tmp/out/app.apk --title "Web2APK - ${{ github.event.inputs.app_name }}" --notes "URL: ${{ github.event.inputs.web_url }}" || gh release upload "$TAG" /tmp/out/app.apk --clobber
+          gh release create "$TAG" /tmp/app-release.apk --title "Web2APK - ${{ github.event.inputs.app_name }}" --notes "URL: ${{ github.event.inputs.web_url }}" || gh release upload "$TAG" /tmp/app-release.apk --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
