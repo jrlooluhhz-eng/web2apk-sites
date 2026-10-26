@@ -1,152 +1,141 @@
-name: Build APK Universal
+- name: Detect & Build
+  run: |
+    set -e
+    ROOT="$GITHUB_WORKSPACE/project"
+    PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
+    INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
 
-on:
-  release:
-    types: [created]
+    if [ -n "$PUBSPEC" ]; then
+      echo "📦 TYPE: FLUTTER PROJECT"
+      cd "$(dirname "$PUBSPEC")"
+      if [ ! -d "android" ]; then
+        flutter create . --platforms=android
+      fi
+      
+      # --- FIX KRUSIAL: Paksa geolocator_android ke 4.6.1 ---
+      # Ini memperbaiki error "Could not get unknown property 'flutter'"
+      # yang terjadi pada Flutter 3.24.5 dengan geolocator_android 4.6.2
+      if ! grep -q "dependency_overrides" pubspec.yaml; then
+        echo "" >> pubspec.yaml
+        echo "dependency_overrides:" >> pubspec.yaml
+        echo "  geolocator_android: 4.6.1" >> pubspec.yaml
+      fi
+      # -----------------------------------------------------
+      
+      echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+      sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
+      
+      # --- UPDATE IZIN ---
+      MANIFEST="android/app/src/main/AndroidManifest.xml"
+      if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+        sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>\n    <application|' "$MANIFEST"
+      fi
+      sed -i 's|<application|<application android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"|' "$MANIFEST"
+      # -------------------
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ github.event.release.tag_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
+      flutter pub get
+      flutter build apk --release --obfuscate --split-debug-info=./debug-info
+      APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
 
-      - name: Download ZIP
-        run: |
-          mkdir -p /tmp/build
-          for i in 1 2 3 4 5 6; do
-            gh release download "$TAG" --repo "${{ github.repository }}" -D /tmp/build --pattern "*.zip" 2>/dev/null && break
-            sleep 5
-          done
-          ZIPFILE=$(find /tmp/build -name "*.zip" | head -n 1)
-          if [ -z "$ZIPFILE" ]; then
-            echo "❌ No ZIP found in release!"
-            exit 1
-          fi
-          mkdir -p "$GITHUB_WORKSPACE/project"
-          unzip -o -q "$ZIPFILE" -d "$GITHUB_WORKSPACE/project"
+    elif [ -n "$INDEX_HTML" ]; then
+      echo "🌐 TYPE: WEB ZIP (HTML/JS)"
+      WEB_DIR=$(dirname "$INDEX_HTML")
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          # FIX: Turunkan versi Flutter ke 3.24.5 yang stabil dan tidak memaksa Gradle 8.14
-          flutter-version: '3.24.5' 
-          channel: 'stable'
-          cache: true
+      APP_DIR=/tmp/webview_build
+      flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
+      cd "$APP_DIR"
+      
+      sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
+      
+      flutter pub add webview_flutter
+      flutter pub add flutter_downloader
+      flutter pub add permission_handler
 
-      - name: Detect & Build
-        run: |
-          set -e
-          ROOT="$GITHUB_WORKSPACE/project"
-          PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
-          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
+      mkdir -p assets/www
+      cp -r "$WEB_DIR"/. assets/www/
 
-          if [ -n "$PUBSPEC" ]; then
-            echo "📦 TYPE: FLUTTER PROJECT"
-            cd "$(dirname "$PUBSPEC")"
-            if [ ! -d "android" ]; then
-              flutter create . --platforms=android
-            fi
-            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-            
-            # FIX: Pastikan Gradle wrapper menggunakan versi yang didukung (8.10.2)
-            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
-            
-            flutter pub get
-            flutter build apk --release --obfuscate --split-debug-info=./debug-info
-            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+      cat << 'DART_EOF' > lib/main.dart
+      import 'package:flutter/material.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:flutter_downloader/flutter_downloader.dart';
+      import 'package:permission_handler/permission_handler.dart';
 
-          elif [ -n "$INDEX_HTML" ]; then
-            echo "🌐 TYPE: WEB ZIP (HTML/JS)"
-            WEB_DIR=$(dirname "$INDEX_HTML")
+      void main() async {
+        WidgetsFlutterBinding.ensureInitialized();
+        await FlutterDownloader.initialize(debug: false, ignoreSsl: true);
+        runApp(const MyApp());
+      }
 
-            APP_DIR=/tmp/webview_build
-            flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
-            cd "$APP_DIR"
-            
-            # FIX: Pastikan Gradle wrapper menggunakan versi yang didukung (8.10.2)
-            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
-            
-            flutter pub add webview_flutter
+      class MyApp extends StatelessWidget {
+        const MyApp({super.key});
+        @override
+        Widget build(BuildContext context) {
+          return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+        }
+      }
 
-            mkdir -p assets/www
-            cp -r "$WEB_DIR"/. assets/www/
+      class WebViewScreen extends StatefulWidget {
+        const WebViewScreen({super.key});
+        @override
+        State<WebViewScreen> createState() => _WebViewScreenState();
+      }
 
-            cat << 'DART_EOF' > lib/main.dart
-            import 'package:flutter/material.dart';
-            import 'package:webview_flutter/webview_flutter.dart';
+      class _WebViewScreenState extends State<WebViewScreen> {
+        late final WebViewController controller;
+        bool _loading = true;
 
-            void main() => runApp(const MyApp());
+        @override
+        void initState() {
+          super.initState();
+          _requestPermissions();
+          
+          controller = WebViewController()
+            ..setJavaScriptMode(JavaScriptMode.unrestricted)
+            ..setNavigationDelegate(NavigationDelegate(
+              onPageFinished: (_) => setState(() => _loading = false),
+            ))
+            ..loadFlutterAsset('assets/www/index.html');
+        }
 
-            class MyApp extends StatelessWidget {
-              const MyApp({super.key});
-              @override
-              Widget build(BuildContext context) {
-                return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
-              }
-            }
+        Future<void> _requestPermissions() async {
+          await Permission.storage.request();
+          await Permission.notification.request();
+        }
 
-            class WebViewScreen extends StatefulWidget {
-              const WebViewScreen({super.key});
-              @override
-              State<WebViewScreen> createState() => _WebViewScreenState();
-            }
+        @override
+        Widget build(BuildContext context) {
+          return Scaffold(body: Stack(children: [
+            WebViewWidget(controller: controller), 
+            if (_loading) const Center(child: CircularProgressIndicator())
+          ]));
+        }
+      }
+      DART_EOF
 
-            class _WebViewScreenState extends State<WebViewScreen> {
-              late final WebViewController controller;
-              bool _loading = true;
-              @override
-              void initState() {
-                super.initState();
-                controller = WebViewController()
-                  ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                  ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
-                  ..loadFlutterAsset('assets/www/index.html');
-              }
-              @override
-              Widget build(BuildContext context) {
-                return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
-              }
-            }
-          DART_EOF
+      {
+        echo "  assets:"
+        find assets -type d | sed 's|$|/|; s|^|    - |'
+      } > /tmp/assets.txt
+      sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
 
-            {
-              echo "  assets:"
-              find assets -type d | sed 's|$|/|; s|^|    - |'
-            } > /tmp/assets.txt
-            sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
+      MANIFEST="android/app/src/main/AndroidManifest.xml"
+      if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+        sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>\n    <application|' "$MANIFEST"
+      fi
+      sed -i 's|<application|<application android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"|' "$MANIFEST"
 
-            MANIFEST="android/app/src/main/AndroidManifest.xml"
-            if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-              sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
-            fi
-            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
+      echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+      flutter pub get
+      flutter build apk --release --obfuscate --split-debug-info=./debug-info
+      APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
 
-            echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-            flutter pub get
-            flutter build apk --release --obfuscate --split-debug-info=./debug-info
-            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+    else
+      echo "❌ Unknown project type!"
+      exit 1
+    fi
 
-          else
-            echo "❌ Unknown project type!"
-            exit 1
-          fi
-
-          if [ ! -f "$APK" ]; then
-            echo "❌ APK file not found after build!"
-            exit 1
-          fi
-          cp "$APK" /tmp/app-release.apk
-
-      - name: Upload APK to Release
-        run: |
-          gh release upload "$TAG" /tmp/app-release.apk --clobber --repo "${{ github.repository }}"
+    if [ ! -f "$APK" ]; then
+      echo "❌ APK file not found after build!"
+      exit 1
+    fi
+    cp "$APK" /tmp/app-release.apk
