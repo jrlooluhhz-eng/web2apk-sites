@@ -1,4 +1,4 @@
-name: Web2APK Build
+name: Web2APK
 run-name: "Web2APK - ${{ github.event.inputs.app_id }}"
 
 on:
@@ -27,40 +27,7 @@ on:
         default: '{}'
 
 jobs:
-  # ==========================================
-  # JOB 1: DETEKSI JENIS PROJECT
-  # ==========================================
-  detect-project:
-    runs-on: ubuntu-latest
-    outputs:
-      project_type: ${{ steps.check.outputs.type }}
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Detect Project Type
-        id: check
-        run: |
-          ROOT="$GITHUB_WORKSPACE/project"
-          PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
-          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
-
-          if [ -n "$PUBSPEC" ]; then
-            echo "📦 TYPE: FLUTTER PROJECT"
-            echo "type=flutter" >> $GITHUB_OUTPUT
-          elif [ -n "$INDEX_HTML" ]; then
-            echo "🌐 TYPE: WEB ZIP (HTML/JS)"
-            echo "type=web" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Unknown project type!"
-            echo "type=unknown" >> $GITHUB_OUTPUT
-          fi
-
-  # ==========================================
-  # JOB 2: BUILD FLUTTER PROJECT
-  # ==========================================
-  build-flutter:
-    needs: detect-project
-    if: needs.detect-project.outputs.project_type == 'flutter'
+  build_web:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,7 +47,7 @@ jobs:
           channel: 'stable'
           cache: true
       
-      - name: Detect & Build (Flutter)
+      - name: Detect & Build (Web)
         env:
           APP_ID: ${{ github.event.inputs.app_id }}
           WEB_URL: ${{ github.event.inputs.web_url }}
@@ -89,107 +56,14 @@ jobs:
         run: |
           set -e
           ROOT="$GITHUB_WORKSPACE/project"
-          PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
-          cd "$(dirname "$PUBSPEC")"
-          
-          if [ ! -d "android" ]; then
-            flutter create . --platforms=android
-          fi
+          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
 
-          # --- FIX GEOLOCATOR ---
-          if ! grep -q "dependency_overrides" pubspec.yaml; then
-            echo "" >> pubspec.yaml
-            echo "dependency_overrides:" >> pubspec.yaml
-            echo "  geolocator_android: 4.6.1" >> pubspec.yaml
-          fi
-
-          echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-          sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
-
-          # --- FIX MANIFEST (PHP) ---
-          php -r '
-            $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
-            if (strpos($manifest, "android.permission.INTERNET") === false) {
-              $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
-              $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
-            }
-            if (strpos($manifest, "usesCleartextTraffic") === false) {
-              $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
-            }
-            file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
-          '
-
-          flutter pub get
-          flutter build apk --release --obfuscate --split-debug-info=./debug-info
-          APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
-
-          if [ ! -f "$APK" ]; then
-            echo "❌ APK file not found after build!"
+          if [ -z "$INDEX_HTML" ]; then
+            echo "❌ index.html tidak ditemukan! Pastikan ZIP berisi file web."
             exit 1
           fi
-          
-          # Setup Ikon
-          if [ -n "$ICON_URL" ]; then
-            curl -sL "$ICON_URL" -o /tmp/icon.png || true
-            if [ -s /tmp/icon.png ]; then
-              cat > flutter_launcher_icons.yaml << YAML_EOF
-          flutter_launcher_icons:
-            android: true
-            ios: false
-            image_path: "/tmp/icon.png"
-          YAML_EOF
-              flutter pub add flutter_launcher_icons --dev
-              flutter pub get
-              dart run flutter_launcher_icons || true
-            fi
-          fi
-          
-          cp "$APK" /tmp/app-release.apk
 
-      - name: Upload APK to Release
-        run: |
-          TAG="${{ github.event.inputs.app_id }}"
-          gh release create "$TAG" /tmp/app-release.apk --title "Web2APK - ${{ github.event.inputs.app_name }}" --notes "URL: ${{ github.event.inputs.web_url }}" || gh release upload "$TAG" /tmp/app-release.apk --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ==========================================
-  # JOB 3: BUILD WEB ZIP (HTML/JS)
-  # ==========================================
-  build-web:
-    needs: detect-project
-    if: needs.detect-project.outputs.project_type == 'web'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-      
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.5'
-          channel: 'stable'
-          cache: true
-      
-      - name: Detect & Build (Web ZIP)
-        env:
-          APP_ID: ${{ github.event.inputs.app_id }}
-          WEB_URL: ${{ github.event.inputs.web_url }}
-          APP_NAME: ${{ github.event.inputs.app_name }}
-          ICON_URL: ${{ github.event.inputs.icon_url }}
-        run: |
-          set -e
-          ROOT="$GITHUB_WORKSPACE/project"
-          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
           WEB_DIR=$(dirname "$INDEX_HTML")
-
           APP_DIR=/tmp/webview_build
           flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
           cd "$APP_DIR"
@@ -203,7 +77,9 @@ jobs:
           mkdir -p assets/www
           cp -r "$WEB_DIR"/. assets/www/
 
+          # --- Buat file main.dart (DENGAN FITUR UPLOAD FILE) ---
           cat << 'DART_EOF' > lib/main.dart
+          import 'dart:io';
           import 'package:flutter/material.dart';
           import 'package:webview_flutter/webview_flutter.dart';
           import 'package:flutter_downloader/flutter_downloader.dart';
@@ -240,8 +116,12 @@ jobs:
 
               controller = WebViewController()
                 ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                // FITUR UPLOAD FILE DARI WEB
                 ..setNavigationDelegate(NavigationDelegate(
                   onPageFinished: (_) => setState(() => _loading = false),
+                  onWebResourceError: (error) {
+                    // Handling error
+                  },
                 ))
                 ..loadFlutterAsset('assets/www/index.html');
             }
@@ -249,6 +129,10 @@ jobs:
             Future<void> _requestPermissions() async {
               await Permission.storage.request();
               await Permission.notification.request();
+              // Izin untuk Android 13+
+              await Permission.photos.request();
+              await Permission.videos.request();
+              await Permission.audio.request();
             }
 
             @override
@@ -261,28 +145,27 @@ jobs:
           }
           DART_EOF
 
+          # --- Daftarkan asset ke pubspec.yaml ---
           {
             echo "  assets:"
             find assets -type d | sed 's|$|/|; s|^|    - |'
           } > /tmp/assets.txt
           sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
 
-          # --- FIX MANIFEST WEB ZIP (PHP) ---
+          # --- Edit AndroidManifest.xml (LENGKAP DENGAN IZIN DOKUMEN) ---
           php -r '
             $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
             
-            # 1. Tambahkan Izin
             if (strpos($manifest, "android.permission.INTERNET") === false) {
-              $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
+              // Tambahan MANAGE_EXTERNAL_STORAGE untuk Android 11+
+              $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
               $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
             }
             
-            # 2. Tambahkan Atribut Application
             if (strpos($manifest, "usesCleartextTraffic") === false) {
               $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
             }
             
-            # 3. Tambahkan Provider & Receiver untuk Flutter Downloader
             if (strpos($manifest, "flutter_downloader.provider") === false) {
               $downloader_nodes = "
                   <provider
@@ -304,8 +187,8 @@ jobs:
             
             file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
           '
-          
-          # --- TAMBAHKAN FILE PROVIDER_PATHS.XML ---
+
+          # --- Buat file provider_paths.xml ---
           mkdir -p android/app/src/main/res/xml
           cat > android/app/src/main/res/xml/provider_paths.xml << 'XML_EOF'
 <?xml version="1.0" encoding="utf-8"?>
@@ -322,11 +205,11 @@ XML_EOF
           APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "❌ APK file not found after build!"
+            echo "❌ APK gagal di-build!"
             exit 1
           fi
           
-          # Setup Ikon
+          # Setup Ikon (Jika diisi)
           if [ -n "$ICON_URL" ]; then
             curl -sL "$ICON_URL" -o /tmp/icon.png || true
             if [ -s /tmp/icon.png ]; then
