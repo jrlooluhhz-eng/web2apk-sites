@@ -1,4 +1,5 @@
-Name: Build APK Universal
+name: Build APK Universal
+
 on:
   release:
     types: [created]
@@ -6,20 +7,21 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-          
+
       - name: Download ZIP
         run: |
-          TAG=${{ github.event.release.tag_name }}
           mkdir -p /tmp/build
           for i in 1 2 3 4 5 6; do
             gh release download "$TAG" --repo "${{ github.repository }}" -D /tmp/build --pattern "*.zip" 2>/dev/null && break
@@ -30,114 +32,115 @@ jobs:
             echo "❌ No ZIP found in release!"
             exit 1
           fi
-          mkdir -p ./project
-          unzip -o "$ZIPFILE" -d ./project
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+          mkdir -p "$GITHUB_WORKSPACE/project"
+          unzip -o -q "$ZIPFILE" -d "$GITHUB_WORKSPACE/project"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.8'
           channel: 'stable'
           cache: true
-          cache-key: "flutter-:os:-:channel:-:version:-:arch:-:hash:"
-      
+
       - name: Detect & Build
         run: |
-          PUBSPEC=$(find ./project -name "pubspec.yaml" | head -n 1)
-          INDEX_HTML=$(find ./project -name "index.html" | head -n 1)
-          
+          set -e
+          ROOT="$GITHUB_WORKSPACE/project"
+          PUBSPEC=$(find "$ROOT" -name "pubspec.yaml" -not -path "*/.*" | head -n 1)
+          INDEX_HTML=$(find "$ROOT" -name "index.html" -not -path "*/node_modules/*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d' ' -f2-)
+
           if [ -n "$PUBSPEC" ]; then
             echo "📦 TYPE: FLUTTER PROJECT"
-            DIR=$(dirname "$PUBSPEC")
-            cd "$DIR"
+            cd "$(dirname "$PUBSPEC")"
             if [ ! -d "android" ]; then
               flutter create . --platforms=android
             fi
-            mkdir -p android
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
-            APK=$(find . -name "app-release.apk" | head -n 1)
-            
+            flutter build apk --release --obfuscate --split-debug-info=./debug-info
+            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+
           elif [ -n "$INDEX_HTML" ]; then
             echo "🌐 TYPE: WEB ZIP (HTML/JS)"
             WEB_DIR=$(dirname "$INDEX_HTML")
-            cd "$WEB_DIR"
-            
-            flutter create --org com.anonymous --project-name webview_app webview_build
-            cd webview_build
+
+            # Buat project Flutter di luar folder web agar tidak ikut tersalin
+            APP_DIR=/tmp/webview_build
+            flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
+            cd "$APP_DIR"
             flutter pub add webview_flutter
-            
+
             mkdir -p assets/www
-            cp -r ../. ./assets/www/ 2>/dev/null || true
-            
+            cp -r "$WEB_DIR"/. assets/www/
+
             cat << 'DART_EOF' > lib/main.dart
-import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+            import 'package:flutter/material.dart';
+            import 'package:webview_flutter/webview_flutter.dart';
 
-void main() => runApp(const MyApp());
+            void main() => runApp(const MyApp());
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
-  }
-}
+            class MyApp extends StatelessWidget {
+              const MyApp({super.key});
+              @override
+              Widget build(BuildContext context) {
+                return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+              }
+            }
 
-class WebViewScreen extends StatefulWidget {
-  const WebViewScreen({super.key});
-  @override
-  State<WebViewScreen> createState() => _WebViewScreenState();
-}
+            class WebViewScreen extends StatefulWidget {
+              const WebViewScreen({super.key});
+              @override
+              State<WebViewScreen> createState() => _WebViewScreenState();
+            }
 
-class _WebViewScreenState extends State<WebViewScreen> {
-  late final WebViewController controller;
-  bool _loading = true;
-  @override
-  void initState() {
-    super.initState();
-    controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
-      ..loadFlutterAsset('assets/www/index.html');
-  }
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
-  }
-}
-DART_EOF
-            
-            echo "  assets:" >> pubspec.yaml
-            echo "    - assets/www/" >> pubspec.yaml
-            
+            class _WebViewScreenState extends State<WebViewScreen> {
+              late final WebViewController controller;
+              bool _loading = true;
+              @override
+              void initState() {
+                super.initState();
+                controller = WebViewController()
+                  ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                  ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
+                  ..loadFlutterAsset('assets/www/index.html');
+              }
+              @override
+              Widget build(BuildContext context) {
+                return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
+              }
+            }
+            DART_EOF
+
+            # Daftarkan SEMUA subfolder assets (Flutter tidak rekursif)
+            {
+              echo "  assets:"
+              find assets -type d | sed 's|$|/|; s|^|    - |'
+            } > /tmp/assets.txt
+            sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
+
             MANIFEST="android/app/src/main/AndroidManifest.xml"
             if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
               sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
             fi
-            mkdir -p android
+            # Izinkan http (cleartext) untuk web lokal
+            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
+
             echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
             flutter pub get
-            flutter build apk --release -v --obfuscate --split-debug-info=./debug-info
-            APK=$(find . -name "app-release.apk" | head -n 1)
-            
+            flutter build apk --release --obfuscate --split-debug-info=./debug-info
+            APK="$(pwd)/build/app/outputs/flutter-apk/app-release.apk"
+
           else
             echo "❌ Unknown project type!"
             exit 1
           fi
-          
-          if [ -z "$APK" ]; then
+
+          if [ ! -f "$APK" ]; then
             echo "❌ APK file not found after build!"
             exit 1
           fi
           cp "$APK" /tmp/app-release.apk
-      
+
       - name: Upload APK to Release
         run: |
-          TAG=${{ github.event.release.tag_name }}
           gh release upload "$TAG" /tmp/app-release.apk --clobber --repo "${{ github.repository }}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
