@@ -1,4 +1,4 @@
-- name: Detect & Build
+name: Detect & Build
   run: |
     set -e
     ROOT="$GITHUB_WORKSPACE/project"
@@ -11,27 +11,29 @@
       if [ ! -d "android" ]; then
         flutter create . --platforms=android
       fi
-      
-      # --- FIX KRUSIAL: Paksa geolocator_android ke 4.6.1 ---
-      # Ini memperbaiki error "Could not get unknown property 'flutter'"
-      # yang terjadi pada Flutter 3.24.5 dengan geolocator_android 4.6.2
+
+      # --- FIX GEOLOCATOR ---
       if ! grep -q "dependency_overrides" pubspec.yaml; then
         echo "" >> pubspec.yaml
         echo "dependency_overrides:" >> pubspec.yaml
         echo "  geolocator_android: 4.6.1" >> pubspec.yaml
       fi
-      # -----------------------------------------------------
-      
+
       echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
       sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
-      
-      # --- UPDATE IZIN ---
-      MANIFEST="android/app/src/main/AndroidManifest.xml"
-      if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-        sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>\n    <application|' "$MANIFEST"
-      fi
-      sed -i 's|<application|<application android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"|' "$MANIFEST"
-      # -------------------
+
+      # --- FIX MANIFEST (PHP) ---
+      php -r '
+        $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
+        if (strpos($manifest, "android.permission.INTERNET") === false) {
+          $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
+          $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
+        }
+        if (strpos($manifest, "usesCleartextTraffic") === false) {
+          $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
+        }
+        file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
+      '
 
       flutter pub get
       flutter build apk --release --obfuscate --split-debug-info=./debug-info
@@ -44,9 +46,9 @@
       APP_DIR=/tmp/webview_build
       flutter create --org com.anonymous --project-name webview_app --platforms=android "$APP_DIR"
       cd "$APP_DIR"
-      
+
       sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties
-      
+
       flutter pub add webview_flutter
       flutter pub add flutter_downloader
       flutter pub add permission_handler
@@ -88,7 +90,7 @@
         void initState() {
           super.initState();
           _requestPermissions();
-          
+
           controller = WebViewController()
             ..setJavaScriptMode(JavaScriptMode.unrestricted)
             ..setNavigationDelegate(NavigationDelegate(
@@ -105,7 +107,7 @@
         @override
         Widget build(BuildContext context) {
           return Scaffold(body: Stack(children: [
-            WebViewWidget(controller: controller), 
+            WebViewWidget(controller: controller),
             if (_loading) const Center(child: CircularProgressIndicator())
           ]));
         }
@@ -118,11 +120,45 @@
       } > /tmp/assets.txt
       sed -i '/^flutter:/r /tmp/assets.txt' pubspec.yaml
 
-      MANIFEST="android/app/src/main/AndroidManifest.xml"
-      if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-        sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>\n    <application|' "$MANIFEST"
-      fi
-      sed -i 's|<application|<application android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"|' "$MANIFEST"
+      # --- FIX MANIFEST WEB ZIP (PHP) ---
+      php -r '
+        $manifest = file_get_contents("android/app/src/main/AndroidManifest.xml");
+        
+        // 1. Tambahkan Izin
+        if (strpos($manifest, "android.permission.INTERNET") === false) {
+          $permissions = "\n    <uses-permission android:name=\"android.permission.INTERNET\"/>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\"/>\n    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>\n    <uses-permission android:name=\"android.permission.READ_MEDIA_AUDIO\"/>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>\n    <uses-permission android:name=\"android.permission.DOWNLOAD_WITHOUT_NOTIFICATION\"/>\n";
+          $manifest = preg_replace("/(<manifest[^>]*>)/", "$1" . $permissions, $manifest, 1);
+        }
+        
+        // 2. Tambahkan Atribut Application
+        if (strpos($manifest, "usesCleartextTraffic") === false) {
+          $manifest = preg_replace("/(<application[^>]*)/", "$1 android:usesCleartextTraffic=\"true\" android:requestLegacyExternalStorage=\"true\"", $manifest, 1);
+        }
+        
+        // 3. WAJIB: Tambahkan Provider & Receiver untuk Flutter Downloader
+        if (strpos($manifest, "flutter_downloader.provider") === false) {
+          $downloader_nodes = '
+              <provider
+                  android:name="vn.hunghd.flutterdownloader.DownloadedFileProvider"
+                  android:authorities="${applicationId}.flutter_downloader.provider"
+                  android:exported="false"
+                  android:grantUriPermissions="true">
+                  <meta-data
+                      android:name="android.support.FILE_PROVIDER_PATHS"
+                      android:resource="@xml/provider_paths"/>
+              </provider>
+              <provider
+                  android:name="vn.hunghd.flutterdownloader.FlutterDownloaderInitializer"
+                  android:authorities="${applicationId}.flutter_downloader.provider.initializer"
+                  android:exported="false" />
+          ';
+          // Sisipkan sebelum tag penutup </application>
+          $manifest = preg_replace("/(<\/application>)/", $downloader_nodes . "$1", $manifest, 1);
+        }
+        
+        file_put_contents("android/app/src/main/AndroidManifest.xml", $manifest);
+      '
+      # ---------------------------------------------
 
       echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
       flutter pub get
