@@ -1,4 +1,4 @@
-name: Build APK Universal
+Name: Build APK Universal
 on:
   release:
     types: [created]
@@ -22,7 +22,7 @@ jobs:
           TAG=${{ github.event.release.tag_name }}
           mkdir -p /tmp/build
           for i in 1 2 3 4 5 6; do
-            gh release download $TAG --repo ${{ github.repository }} -D /tmp/build --pattern "*.zip" 2>/dev/null && break
+            gh release download "$TAG" --repo "${{ github.repository }}" -D /tmp/build --pattern "*.zip" 2>/dev/null && break
             sleep 5
           done
           ZIPFILE=$(find /tmp/build -name "*.zip" | head -n 1)
@@ -41,6 +41,7 @@ jobs:
           flutter-version: '3.32.8'
           channel: 'stable'
           cache: true
+          cache-key: "flutter-:os:-:channel:-:version:-:arch:-:hash:"
       
       - name: Detect & Build
         run: |
@@ -72,43 +73,43 @@ jobs:
             mkdir -p assets/www
             cp -r ../. ./assets/www/ 2>/dev/null || true
             
-            cat > lib/main.dart << DART_EOF
-          import 'package:flutter/material.dart';
-          import 'package:webview_flutter/webview_flutter.dart';
-          
-          void main() => runApp(const MyApp());
-          
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
-            }
-          }
-          
-          class WebViewScreen extends StatefulWidget {
-            const WebViewScreen({super.key});
-            @override
-            State<WebViewScreen> createState() => _WebViewScreenState();
-          }
-          
-          class _WebViewScreenState extends State<WebViewScreen> {
-            late final WebViewController controller;
-            bool _loading = true;
-            @override
-            void initState() {
-              super.initState();
-              controller = WebViewController()
-                ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
-                ..loadFlutterAsset('assets/www/index.html');
-            }
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
-            }
-          }
-          DART_EOF
+            cat << 'DART_EOF' > lib/main.dart
+import 'package:flutter/material.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(debugShowCheckedModeBanner: false, home: const WebViewScreen());
+  }
+}
+
+class WebViewScreen extends StatefulWidget {
+  const WebViewScreen({super.key});
+  @override
+  State<WebViewScreen> createState() => _WebViewScreenState();
+}
+
+class _WebViewScreenState extends State<WebViewScreen> {
+  late final WebViewController controller;
+  bool _loading = true;
+  @override
+  void initState() {
+    super.initState();
+    controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => setState(() => _loading = false)))
+      ..loadFlutterAsset('assets/www/index.html');
+  }
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(body: Stack(children: [WebViewWidget(controller: controller), if (_loading) const Center(child: CircularProgressIndicator())]));
+  }
+}
+DART_EOF
             
             echo "  assets:" >> pubspec.yaml
             echo "    - assets/www/" >> pubspec.yaml
@@ -137,6 +138,6 @@ jobs:
       - name: Upload APK to Release
         run: |
           TAG=${{ github.event.release.tag_name }}
-          gh release upload $TAG /tmp/app-release.apk --clobber --repo ${{ github.repository }}
+          gh release upload "$TAG" /tmp/app-release.apk --clobber --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
