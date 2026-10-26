@@ -226,4 +226,6 @@ jobs:
           TAG="${{ github.event.inputs.app_id }}"
           gh release create "$TAG" /tmp/app-release.apk --title "Web2APK - ${{ github.event.inputs.app_name }}" --notes "URL: ${{ github.event.inputs.web_url }}" || gh release upload "$TAG" /tmp/app-release.apk --clobber
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}-release.apk --clobber
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
